@@ -1,0 +1,29 @@
+version: '3.8'
+
+services:
+  opencode-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: opencode-multi-tenant
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      - JWT_SECRET=${JWT_SECRET:-your-secret-key-change-in-production}
+      - OPENCODE_API_KEY=${OPENCODE_API_KEY}
+      - STORAGE_DIR=/app/data
+    volumes:
+      - opencode-data:/app/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3000/health')"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+
+volumes:
+  opencode-data:
+    driver: local
