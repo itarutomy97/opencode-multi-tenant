@@ -3,7 +3,7 @@
  */
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "tomtar9779",
+  "name": "opencode-multi-tenant",
   "main": "src/worker-hono.ts",
   "compatibility_date": "2025-05-06",
   "compatibility_flags": ["nodejs_compat"],
@@ -12,7 +12,7 @@
   },
   "vars": {
     "OPENCODE_API_KEY": "sk-Ms9w7DK8k3bWYTe57uIT3qgwo3hJA4o1ik4ObrklBb2pjTnjNodm6zq1l6tQuxV7",
-    "CLERK_SECRET_KEY": "",
-    "CLERK_JWT_KEY": ""
+    "CLERK_SECRET_KEY": "sk_test_CbFNdNXPg7FoEUnUVEdLTxtBnU8v6pjiujpjiLxAp7",
+    "CLERK_PUBLISHABLE_KEY": "pk_test_cmVuZXdlZC1tYXJ0aW4tNjcuY2xlcmsuYWNjb3VudHMuZGV2JA"
   }
 }
