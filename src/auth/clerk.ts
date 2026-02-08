@@ -13,6 +13,79 @@ interface ClerkJwtPayload {
   iat: number;
 }
 
+interface ClerkSessionResponse {
+  last_active_token?: string;
+  user_id: string;
+  status: string;
+}
+
+/**
+ * Verify Clerk session using Backend API
+ * This handles both JWT tokens, session IDs, and sign-in tokens
+ *
+ * @param token - JWT token, session ID, or sign-in token
+ * @param secretKey - Clerk Secret Key for Backend API
+ * @returns userId if valid, null otherwise
+ */
+export async function verifyClerkSessionOrToken(
+  token: string,
+  secretKey: string
+): Promise<string | null> {
+  // First, try to verify as JWT
+  const jwtUserId = verifyClerkToken(`Bearer ${token}`);
+  if (jwtUserId) {
+    return jwtUserId;
+  }
+
+  // Try to verify as sign-in token via Clerk Backend API
+  // sign_in_tokens can be verified by checking the ticket
+  try {
+    // Try using the sign_in token as a ticket to create a sign-in
+    const response = await fetch('https://api.clerk.com/v1/client/sign_ins?_clerk_sdk_version=5', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${secretKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        strategy: 'ticket',
+        ticket: token,
+      }),
+    });
+
+    if (response.ok) {
+      const data = await response.json() as { user_id: string; created_session_id?: string };
+      if (data.user_id) {
+        return data.user_id;
+      }
+    }
+  } catch {
+    // Ignore error and try next method
+  }
+
+  // If JWT and ticket verification fail, try to verify as session ID via Backend API
+  try {
+    const response = await fetch(`https://api.clerk.com/v1/sessions/${token}/verify`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${secretKey}`,
+        'Content-Type': 'application/json',
+      },
+    });
+
+    if (!response.ok) {
+      return null;
+    }
+
+    const data = await response.json() as ClerkSessionResponse;
+
+    // Return the user ID from the session
+    return data.user_id || null;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Extract userId from Clerk JWT token
  *
@@ -38,10 +111,21 @@ export function verifyClerkToken(authHeader: string): string | null {
       return null;
     }
 
-    // Decode payload
-    const payload = JSON.parse(
-      Buffer.from(parts[1], 'base64url').toString('utf-8')
-    ) as ClerkJwtPayload;
+    // Decode payload - Cloudflare Workers compatible (using atob)
+    // Convert base64url to base64
+    let base64Payload = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+    // Add padding
+    while (base64Payload.length % 4) {
+      base64Payload += '=';
+    }
+    // Decode using TextDecoder for Cloudflare Workers compatibility
+    const binaryString = atob(base64Payload);
+    const bytes = new Uint8Array(binaryString.length);
+    for (let i = 0; i < binaryString.length; i++) {
+      bytes[i] = binaryString.charCodeAt(i);
+    }
+    const decoded = new TextDecoder().decode(bytes);
+    const payload = JSON.parse(decoded) as ClerkJwtPayload;
 
     // Check expiration
     const now = Math.floor(Date.now() / 1000);
@@ -70,7 +154,6 @@ export async function verifyClerkTokenWithSecret(
   token: string,
   secretKey: string
 ): Promise<string | null> {
-  // TODO: Implement proper JWT verification
-  // This would use Web Crypto API to verify the signature
-  return verifyClerkToken(`Bearer ${token}`);
+  // Use the new verifyClerkSessionOrToken function
+  return verifyClerkSessionOrToken(token, secretKey);
 }

@@ -1,153 +1,134 @@
 # OpenCode Multi-Tenant API
 
-OpenCode SDKを使用したマルチユーザー対応のAIエージェントAPIサーバー。ユーザーごとにセッションとファイルを安全に分離して管理します。
+OpenCode SDKを使用したマルチユーザー対応のAIエージェントAPIサーバー。Cloudflare Workers + Hono + Clerk 認証で構築されています。
 
 ## 機能
 
-- **JWT認証**: セキュアなトークンベース認証
+- **Clerk認証**: セキュアなWeb認証（Clerk JS SDK統合）
 - **セッション管理**: ユーザーごとのAIセッションを分離管理
-- **ファイル管理**: ユーザー別ディレクトリでファイルを安全に分離
-- **OpenCode SDK統合**: 複数のLLMプロバイダー対応（Claude、GPT-4、Gemini等）
+- **OpenCode SDK統合**: 複数のLLMプロバイダー対応
 - **REST API**: Honoベースの高速APIエンドポイント
-- **Docker対応**: ワンコマンドでデプロイ可能
+- **Cloudflare Workers**: サーバーレスデプロイ対応
 
 ## セットアップ
 
-### ローカル開発
+### 1. 依存関係インストール
 
 ```bash
-# 依存関係インストール
 npm install
+```
 
-# 環境変数設定
-cp .env.example .env
-# .envを編集してAPIキー等を設定
+### 2. 環境変数設定
 
-# 開発サーバー起動
+`.dev.vars` または `.env` に以下を設定：
+
+```bash
+# OpenCode API
+OPENCODE_API_KEY=your-opencode-api-key
+
+# Clerk Authentication
+CLERK_SECRET_KEY=sk_test_xxx
+CLERK_PUBLISHABLE_KEY=pk_test_xxx
+```
+
+### 3. ローカル開発
+
+```bash
+# 開発サーバー起動（Cloudflare Workers）
 npm run dev
 
-# テスト実行
-npm test
-
-# 型チェック
-npm run typecheck
+# 別のポートで起動
+npx wrangler dev --port 8788
 ```
 
-### Dockerデプロイ
+### 4. Clerk トークンの取得
 
-```bash
-# docker-composeで起動
-docker-compose up -d
-
-# ビルドのみ
-docker build -t opencode-multi-tenant .
-
-# 手動実行
-docker run -p 3000:3000 \
-  -e JWT_SECRET=your-secret \
-  -e OPENCODE_API_KEY=your-api-key \
-  -v opencode-data:/app/data \
-  opencode-multi-tenant
-```
-
-## 環境変数
-
-| 変数 | 説明 | デフォルト値 |
-|------|------|-------------|
-| `PORT` | サーポート番号 | `3000` |
-| `JWT_SECRET` | JWT署名シークレット | `change-this-in-production` |
-| `OPENCODE_API_KEY` | OpenCode APIキー | 必須 |
-| `STORAGE_DIR` | ファイル保存ディレクトリ | `./data` |
-| `NODE_ENV` | 実行環境 | `production` |
+1. ブラウザで `http://localhost:8788/` にアクセス
+2. "Sign In / Sign Up" ボタンをクリック
+3. Clerkでサインイン
+4. "Get My Token" ボタンをクリック
+5. 表示されたトークンをクリックしてコピー
 
 ## APIエンドポイント
 
-### 認証
-
-#### POST /auth/login
-JWTトークンを発行します。
-
-```bash
-curl -X POST http://localhost:3000/auth/login \
-  -H "Content-Type: application/json" \
-  -d '{"userId": "user-123", "password": "password"}'
-```
-
-レスポンス:
-```json
-{
-  "token": "eyJhbGciOiJIUzI1NiIs..."
-}
-```
-
-### セッション管理
-
-#### POST /sessions
-新しいセッションを作成します。
-
-```bash
-curl -X POST http://localhost:3000/sessions \
-  -H "Authorization: Bearer YOUR_TOKEN"
-```
-
-#### GET /sessions/:id
-セッションを取得します。
-
-```bash
-curl http://localhost:3000/sessions/session-0 \
-  -H "Authorization: Bearer YOUR_TOKEN"
-```
-
-#### DELETE /sessions/:id
-セッションを削除します。
-
-```bash
-curl -X DELETE http://localhost:3000/sessions/session-0 \
-  -H "Authorization: Bearer YOUR_TOKEN"
-```
-
 ### ヘルスチェック
 
-#### GET /health
-サーバーの状態を確認します。
+```bash
+curl http://localhost:8788/health
+```
+
+### セッション管理（認証が必要）
 
 ```bash
-curl http://localhost:3000/health
+# セッション作成
+curl -X POST http://localhost:8788/api/sessions \
+  -H "Authorization: Bearer YOUR_CLERK_JWT_TOKEN"
+
+# セッション一覧
+curl http://localhost:8788/api/sessions \
+  -H "Authorization: Bearer YOUR_CLERK_JWT_TOKEN"
+
+# セッション削除
+curl -X DELETE http://localhost:8788/api/sessions/SESSION_ID \
+  -H "Authorization: Bearer YOUR_CLERK_JWT_TOKEN"
 ```
 
-レスポンス:
-```json
-{
-  "status": "ok",
-  "timestamp": "2026-02-06T01:22:00.000Z",
-  "uptime": 123.456
-}
+### プロンプト実行
+
+```bash
+curl -X POST http://localhost:8788/api/prompt \
+  -H "Authorization: Bearer YOUR_CLERK_JWT_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"prompt": "Hello, AI!"}'
 ```
 
-## セキュリティ
+## デプロイ
 
-- **ユーザー分離**: 全てのデータはユーザーIDで分離されており、他ユーザーのデータにアクセスすることはできません
-- **JWT認証**: 全ての保護エンドポイントでJWTトークンが必要です
-- **ファイルサニタイズ**: パストラバーサル攻撃を防止するため、ファイル名とユーザーIDをサニタイズしています
-- **Docker隔離**: コンテナ内で実行されるため、ホストシステムから分離されています
+```bash
+# Cloudflare Workers にデプロイ
+npm run deploy
+```
+
+デプロイ後、`https://your-worker.workers.dev/` にアクセスしてトークンを取得できます。
+
+## 環境変数
+
+| 変数 | 説明 | 必須 |
+|------|------|------|
+| `OPENCODE_API_KEY` | OpenCode APIキー | ✅ |
+| `CLERK_SECRET_KEY` | Clerk Secret Key | ✅ |
+| `CLERK_PUBLISHABLE_KEY` | Clerk Publishable Key | ✅ |
+
+## アーキテクチャ
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  Browser (Web UI)                                              │
+│  - サインイン                                                   │
+│  - JWTトークン取得                                              │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼ JWTトークン
+┌─────────────────────────────────────────────────────────────────┐
+│  Cloudflare Workers (Hono)                                     │
+│  - /health : ヘルスチェック                                     │
+│  - /api/sessions : セッション管理                               │
+│  - /api/prompt : OpenCodeプロンプト実行                         │
+│  - 認証ミドルウェア (Clerk JWT検証)                             │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+                    ┌──────────────────┐
+                    │  OpenCode API    │
+                    └──────────────────┘
+```
 
 ## テスト
 
 ```bash
-# 全テスト実行
 npm test
-
-# ウォッチモード
-npm run test:watch
-
-# カバレッジ
-npm run test:coverage
 ```
 
 ## ライセンス
 
 MIT License
-
-## 貢献
-
-プルリクエストを歓迎します。バグ報告や機能リクエストはIssueにてお願いします。
