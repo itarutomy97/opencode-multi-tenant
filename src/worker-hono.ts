@@ -7,6 +7,8 @@
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { verifyClerkToken } from './auth/clerk.js';
+import { OpenCodeService } from './opencode/opencode-client.js';
+import { DurableObject } from 'cloudflare:workers';
 
 /**
  * Environment variables for Cloudflare Workers
@@ -14,9 +16,24 @@ import { verifyClerkToken } from './auth/clerk.js';
 export interface Env {
   OPENCODE_API_KEY: string;
   CLERK_SECRET_KEY: string;
-  CLERK_JWT_KEY: string;
   CLERK_PUBLISHABLE_KEY: string;
+  SESSIONS: any; // DurableObjectNamespace - using any to avoid type issues
 }
+
+/**
+ * Valid invitation codes for registration
+ * Add your codes here to control who can sign up
+ */
+const INVITATION_CODES = [
+  'FRIENDS-2025',
+  'TARO-FRIENDS',
+  'HANAKO-2025',
+  'DEMO-ACCESS',
+  'TEST-CODE-2025',
+  'EARLY-ADOPTER',
+  'BETA-TESTER',
+  'INVITE-ONLY',
+];
 
 /**
  * Variables stored in Hono context
@@ -30,18 +47,6 @@ type Variables = {
  */
 type AppType = Hono<{ Bindings: Env; Variables: Variables }>;
 
-/**
- * Session data (in-memory, will be replaced with Durable Objects)
- */
-interface Session {
-  id: string;
-  userId: string;
-  createdAt: string;
-}
-
-// Simple in-memory session storage (for demo)
-const sessions = new Map<string, Session>();
-
 // HTML template for home page
 function createHomePage(publishableKey: string): string {
   // Extract frontend API from publishable key for Clerk JS SDK
@@ -52,11 +57,11 @@ function createHomePage(publishableKey: string): string {
 
   return `
 <!DOCTYPE html>
-<html lang="en">
+<html lang="ja">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>OpenCode - Get Auth Token</title>
+  <title>OpenCode - 招待コード認証</title>
   <!-- Clerk JS SDK -->
   <script
     async
@@ -96,6 +101,53 @@ function createHomePage(publishableKey: string): string {
       margin-bottom: 30px;
       font-size: 14px;
     }
+    .invite-section {
+      background: #fef3c7;
+      border: 2px solid #f59e0b;
+      border-radius: 12px;
+      padding: 20px;
+      margin-bottom: 24px;
+    }
+    .invite-label {
+      font-size: 14px;
+      font-weight: 600;
+      color: #92400e;
+      margin-bottom: 8px;
+    }
+    .invite-input {
+      width: 100%;
+      padding: 12px 16px;
+      border: 2px solid #d1d5db;
+      border-radius: 8px;
+      font-size: 16px;
+      transition: border-color 0.2s;
+    }
+    .invite-input:focus {
+      outline: none;
+      border-color: #1e3a8a;
+    }
+    .invite-input.valid {
+      border-color: #10b981;
+      background: #d1fae5;
+    }
+    .invite-input.invalid {
+      border-color: #ef4444;
+      background: #fee2e2;
+    }
+    .invite-hint {
+      font-size: 12px;
+      color: #6b7280;
+      margin-top: 8px;
+    }
+    .invite-error {
+      color: #ef4444;
+      font-size: 13px;
+      margin-top: 8px;
+      display: none;
+    }
+    .invite-error.show {
+      display: block;
+    }
     .steps {
       background: #f9fafb;
       border-radius: 12px;
@@ -126,13 +178,6 @@ function createHomePage(publishableKey: string): string {
       color: #374151;
       line-height: 1.5;
     }
-    .step-text code {
-      background: #e5e7eb;
-      padding: 2px 6px;
-      border-radius: 4px;
-      font-size: 12px;
-      font-family: monospace;
-    }
     .btn {
       display: block;
       width: 100%;
@@ -151,6 +196,10 @@ function createHomePage(publishableKey: string): string {
     }
     .btn:hover {
       background: #1e40af;
+    }
+    .btn:disabled {
+      background: #9ca3af;
+      cursor: not-allowed;
     }
     .btn-secondary {
       background: #10b981;
@@ -206,84 +255,135 @@ function createHomePage(publishableKey: string): string {
       margin-bottom: 12px;
       font-size: 14px;
     }
+    .hidden {
+      display: none;
+    }
   </style>
 </head>
 <body>
   <div class="container">
-    <div class="logo">OpenCode</div>
-    <div class="tagline">Get Authentication Token</div>
+    <div class="logo">OpenCode 🤖</div>
+    <div class="tagline">招待制AIチャットボットAPI</div>
 
-    <div class="steps">
-      <div class="step">
-        <div class="step-num">1</div>
-        <div class="step-text">Sign in with the button below</div>
-      </div>
-      <div class="step">
-        <div class="step-num">2</div>
-        <div class="step-text">Click "Get My Token" button</div>
-      </div>
-      <div class="step">
-        <div class="step-num">3</div>
-        <div class="step-text">Click token to copy</div>
-      </div>
+    <div class="invite-section">
+      <div class="invite-label">🔑 招待コード</div>
+      <input
+        type="text"
+        id="inviteCode"
+        class="invite-input"
+        placeholder="招待コードを入力（例: FRIENDS-2025）"
+        autocomplete="off"
+      >
+      <div class="invite-hint">招待コードをお持ちでない方は、管理者にお問い合わせください</div>
+      <div id="inviteError" class="invite-error">❌ 無効な招待コードです</div>
     </div>
 
     <div id="authContainer">
-      <div class="loading">Loading authentication...</div>
+      <div class="loading">認証を読み込み中...</div>
     </div>
 
-    <button id="getTokenBtn" class="btn btn-secondary">Get My Token</button>
+    <button id="signInBtn" class="btn hidden" disabled>Sign In / Sign Up</button>
+    <button id="getTokenBtn" class="btn btn-secondary hidden">Get My Token</button>
 
     <div id="tokenSection" class="token-section">
-      <div class="token-label">✓ Your JWT Token (click to copy):</div>
+      <div class="token-label">✓ あなたのJWTトークン（クリックしてコピー）:</div>
       <div id="tokenBox" class="token-box">Loading...</div>
     </div>
   </div>
 
   <script>
+    // 有効な招待コードリスト（サーバー側と同じもの）
+    const VALID_CODES = ${JSON.stringify(INVITATION_CODES)};
+
+    const inviteCodeInput = document.getElementById('inviteCode');
+    const inviteError = document.getElementById('inviteError');
     const authContainer = document.getElementById('authContainer');
+    const signInBtn = document.getElementById('signInBtn');
     const getTokenBtn = document.getElementById('getTokenBtn');
     const tokenSection = document.getElementById('tokenSection');
     const tokenBox = document.getElementById('tokenBox');
 
     let clerk = null;
+    let inviteCodeValid = false;
+
+    // 招待コード検証
+    inviteCodeInput.addEventListener('input', function() {
+      const code = this.value.trim().toUpperCase();
+
+      if (VALID_CODES.includes(code)) {
+        this.classList.remove('invalid');
+        this.classList.add('valid');
+        inviteError.classList.remove('show');
+        inviteCodeValid = true;
+        unlockSignUp();
+      } else if (code.length > 0) {
+        this.classList.remove('valid');
+        this.classList.add('invalid');
+        inviteError.textContent = '❌ 無効な招待コードです: ' + code;
+        inviteError.classList.add('show');
+        inviteCodeValid = false;
+        lockSignUp();
+      } else {
+        this.classList.remove('valid', 'invalid');
+        inviteError.classList.remove('show');
+        inviteCodeValid = false;
+        lockSignUp();
+      }
+    });
+
+    function lockSignUp() {
+      signInBtn.classList.add('hidden');
+      getTokenBtn.classList.add('hidden');
+      authContainer.innerHTML = '<div class="loading">🔒 招待コードを入力してください...</div>';
+    }
+
+    function unlockSignUp() {
+      signInBtn.classList.remove('hidden');
+      signInBtn.disabled = false;
+      authContainer.innerHTML = '<div class="signed-in-as">✓ 招待コードが認証されました！サインインできます。</div>';
+    }
 
     async function initClerk() {
       try {
-        // Clerk is already initialized from the script tag
         clerk = window.Clerk;
         await clerk.load();
 
         if (clerk.user) {
-          // User is signed in
           authContainer.innerHTML = '<div class="signed-in-as">✓ Signed in as: ' + (clerk.user.primaryEmailAddress?.emailAddress || clerk.user.id) + '</div>';
-        } else {
-          // Show sign-in button
-          authContainer.innerHTML = '<button id="signInBtn" class="btn">Sign In / Sign Up</button>';
-          document.getElementById('signInBtn').addEventListener('click', () => {
-            clerk.openSignUp({
-              appearance: {
-                elements: {
-                  modal: {
-                    zIndex: 99999
-                  }
-                }
-              }
-            });
-          });
+          if (inviteCodeValid) {
+            getTokenBtn.classList.remove('hidden');
+          }
         }
 
-        // Listen for sign-in changes
         clerk.addListener((resources) => {
           if (resources.user) {
             authContainer.innerHTML = '<div class="signed-in-as">✓ Signed in as: ' + (resources.user.primaryEmailAddress?.emailAddress || resources.user.id) + '</div>';
+            if (inviteCodeValid) {
+              getTokenBtn.classList.remove('hidden');
+            }
           }
         });
       } catch (error) {
         console.error('Clerk init error:', error);
-        authContainer.innerHTML = '<div style="color: #ef4444; text-align: center;">Failed to load authentication: ' + error.message + '</div>';
+        authContainer.innerHTML = '<div style="color: #ef4444; text-align: center;">認証の読み込みに失敗しました: ' + error.message + '</div>';
       }
     }
+
+    signInBtn.addEventListener('click', () => {
+      if (!inviteCodeValid) {
+        alert('先に招待コードを入力してください');
+        return;
+      }
+      clerk.openSignUp({
+        appearance: {
+          elements: {
+            modal: {
+              zIndex: 99999
+            }
+          }
+        }
+      });
+    });
 
     // Wait for Clerk script to load
     const checkClerk = setInterval(() => {
@@ -293,11 +393,10 @@ function createHomePage(publishableKey: string): string {
       }
     }, 100);
 
-    // Timeout after 10 seconds
     setTimeout(() => {
       clearInterval(checkClerk);
       if (!clerk && authContainer.innerHTML.includes('Loading')) {
-        authContainer.innerHTML = '<div style="color: #ef4444; text-align: center;">Failed to load Clerk SDK. Please refresh the page.</div>';
+        authContainer.innerHTML = '<div style="color: #ef4444; text-align: center;">Clerk SDKの読み込みに失敗しました。ページを更新してください。</div>';
       }
     }, 10000);
 
@@ -307,8 +406,7 @@ function createHomePage(publishableKey: string): string {
       getTokenBtn.disabled = true;
 
       try {
-        // Get token directly from Clerk
-        const token = await clerk?.session?.getToken();
+        const token = await clerk?.session?.getToken({ template: 'session' });
 
         if (token) {
           tokenBox.textContent = token;
@@ -323,13 +421,13 @@ function createHomePage(publishableKey: string): string {
             });
           });
         } else {
-          tokenBox.textContent = 'No active session. Please sign in first.';
+          tokenBox.textContent = 'アクティブなセッションがありません。先にサインインしてください。';
           tokenSection.classList.add('show');
           getTokenBtn.textContent = 'Get My Token';
         }
       } catch (error) {
         console.error('Get token error:', error);
-        tokenBox.textContent = 'Error: ' + error.message;
+        tokenBox.textContent = 'エラー: ' + error.message;
         tokenSection.classList.add('show');
         getTokenBtn.textContent = 'Get My Token';
       }
@@ -343,13 +441,302 @@ function createHomePage(publishableKey: string): string {
 }
 
 /**
+ * In-memory session store for local development fallback
+ * Used when SESSIONS binding is not available (e.g., local dev without --remote)
+ */
+class InMemorySessionStore {
+  private sessions = new Map<string, { id: string; userId: string; createdAt: number }>();
+  private messages = new Map<string, Array<{ role: string; content: string }>>();
+  private sessionCounter = 0;
+
+  async createSession(userId: string): Promise<{ id: string; userId: string; createdAt: number }> {
+    const session = {
+      id: `opencode-${Date.now()}-${this.sessionCounter++}`,
+      userId,
+      createdAt: Date.now(),
+    };
+    this.sessions.set(session.id, session);
+    this.messages.set(session.id, []);
+    return session;
+  }
+
+  async getSession(sessionId: string, userId: string): Promise<{ id: string; userId: string; createdAt: number } | null> {
+    const session = this.sessions.get(sessionId);
+    if (session && session.userId === userId) {
+      return session;
+    }
+    return null;
+  }
+
+  async deleteSession(sessionId: string, userId: string): Promise<boolean> {
+    const session = this.sessions.get(sessionId);
+    if (session && session.userId === userId) {
+      this.sessions.delete(sessionId);
+      this.messages.delete(sessionId);
+      return true;
+    }
+    return false;
+  }
+
+  async listUserSessions(userId: string): Promise<Array<{ id: string; userId: string; createdAt: number }>> {
+    return Array.from(this.sessions.values()).filter(s => s.userId === userId);
+  }
+
+  async addMessage(sessionId: string, userId: string, message: { role: string; content: string }): Promise<void> {
+    const session = this.sessions.get(sessionId);
+    if (!session || session.userId !== userId) {
+      throw new Error('Session not found or access denied');
+    }
+    const history = this.messages.get(sessionId) || [];
+    history.push(message);
+    this.messages.set(sessionId, history);
+  }
+
+  async getConversationHistory(sessionId: string, userId: string): Promise<Array<{ role: string; content: string }>> {
+    const session = this.sessions.get(sessionId);
+    if (!session || session.userId !== userId) {
+      return [];
+    }
+    return this.messages.get(sessionId) || [];
+  }
+}
+
+/**
+ * Session Durable Object with SQLite backend
+ *
+ * Stores sessions and conversation history in SQLite database
+ */
+export class SessionDurableObject extends DurableObject {
+  // Unique ID for this Durable Object (singleton pattern)
+  static readonly id = 'SESSION_DURABLE_OBJECT';
+
+  // Flag to track if DB has been initialized
+  private dbInitialized = false;
+
+  constructor(state: any, env: any) {
+    super(state, env);
+  }
+
+  // SQL storage accessor - use ctx.storage.sql
+  private get sql() {
+    return (this as any).ctx.storage.sql;
+  }
+
+  /**
+   * Initialize SQLite database tables
+   */
+  private initDB(): void {
+    if (this.dbInitialized) return;
+
+    const sql = this.sql;
+    if (!sql) {
+      console.error('[SessionDurableObject] SQL storage not available');
+      return;
+    }
+
+    // Create tables one at a time
+    sql.exec('CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, created_at INTEGER NOT NULL)');
+    sql.exec('CREATE TABLE IF NOT EXISTS messages (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL, role TEXT NOT NULL, content TEXT NOT NULL, created_at INTEGER NOT NULL, FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE)');
+    sql.exec('CREATE TABLE IF NOT EXISTS invited_users (id TEXT PRIMARY KEY, email TEXT NOT NULL, invite_code TEXT NOT NULL, created_at INTEGER NOT NULL)');
+    sql.exec('CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id)');
+    sql.exec('CREATE INDEX IF NOT EXISTS idx_messages_session_id ON messages(session_id)');
+    sql.exec('CREATE INDEX IF NOT EXISTS idx_invited_users_email ON invited_users(email)');
+
+    this.dbInitialized = true;
+  }
+
+  /**
+   * Check if an invite code is valid and not already used
+   */
+  async checkInviteCode(inviteCode: string): Promise<boolean> {
+    this.initDB();
+    const upperCode = inviteCode.toUpperCase();
+
+    // Check if code is in the valid list
+    if (!INVITATION_CODES.includes(upperCode)) {
+      return false;
+    }
+
+    // Check if code has been used (optional - you may want to allow reuse)
+    // For now, we'll allow code reuse
+    return true;
+  }
+
+  /**
+   * Register a user as invited (after they sign up)
+   */
+  async registerInvitedUser(userId: string, email: string, inviteCode: string): Promise<void> {
+    this.initDB();
+
+    try {
+      this.sql.exec(
+        'INSERT OR IGNORE INTO invited_users (id, email, invite_code, created_at) VALUES (?, ?, ?, ?)',
+        userId, email, inviteCode.toUpperCase(), Date.now()
+      );
+    } catch (error) {
+      console.error('[SessionDurableObject] Failed to register invited user:', error);
+    }
+  }
+
+  /**
+   * Check if a user was invited (for API access control)
+   */
+  async isUserInvited(userId: string, email?: string): Promise<boolean> {
+    this.initDB();
+
+    // For now, we'll allow any user who has completed Clerk signup
+    // In production, you'd want to check the invited_users table
+    // This is a simplified version since Clerk handles the signup
+    return true;
+  }
+
+  /**
+   * Create a new session
+   */
+  async createSession(userId: string): Promise<{ id: string; userId: string; createdAt: number }> {
+    this.initDB();
+
+    const sessionId = `opencode-${Date.now()}-${Math.random().toString(36).substring(2, 11)}`;
+    const createdAt = Date.now();
+
+    this.sql.exec(
+      'INSERT INTO sessions (id, user_id, created_at) VALUES (?, ?, ?)',
+      sessionId, userId, createdAt
+    );
+
+    return { id: sessionId, userId, createdAt };
+  }
+
+  /**
+   * Get a session by ID (verifies ownership)
+   */
+  async getSession(sessionId: string, userId: string): Promise<{ id: string; userId: string; createdAt: number } | null> {
+    this.initDB();
+
+    const cursor = this.sql.exec(
+      'SELECT id, user_id, created_at FROM sessions WHERE id = ? AND user_id = ?',
+      sessionId, userId
+    );
+
+    const results = cursor.toArray();
+
+    if (!results || results.length === 0) {
+      return null;
+    }
+
+    const row = results[0];
+    return {
+      id: row.id as string,
+      userId: row.user_id as string,
+      createdAt: row.created_at as number,
+    };
+  }
+
+  /**
+   * Delete a session (verifies ownership)
+   */
+  async deleteSession(sessionId: string, userId: string): Promise<boolean> {
+    // First verify ownership
+    const session = await this.getSession(sessionId, userId);
+    if (!session) {
+      return false;
+    }
+
+    // Delete session (messages will be deleted via CASCADE)
+    await this.sql.exec(
+      'DELETE FROM sessions WHERE id = ?',
+      sessionId
+    );
+
+    return true;
+  }
+
+  /**
+   * List all sessions for a user
+   */
+  async listUserSessions(userId: string): Promise<Array<{ id: string; userId: string; createdAt: number }>> {
+    this.initDB();
+
+    const cursor = this.sql.exec(
+      'SELECT id, user_id, created_at FROM sessions WHERE user_id = ? ORDER BY created_at DESC',
+      userId
+    );
+
+    return cursor.toArray().map((row: any) => ({
+      id: row.id as string,
+      userId: row.user_id as string,
+      createdAt: row.created_at as number,
+    }));
+  }
+
+  /**
+   * Add a message to conversation history
+   */
+  async addMessage(sessionId: string, userId: string, message: { role: string; content: string }): Promise<void> {
+    // Verify session exists and belongs to user
+    const session = await this.getSession(sessionId, userId);
+    if (!session) {
+      throw new Error('Session not found or access denied');
+    }
+
+    await this.sql.exec(
+      'INSERT INTO messages (session_id, role, content, created_at) VALUES (?, ?, ?, ?)',
+      sessionId, message.role, message.content, Date.now()
+    );
+  }
+
+  /**
+   * Get conversation history for a session
+   */
+  async getConversationHistory(sessionId: string, userId: string): Promise<Array<{ role: string; content: string }>> {
+    // Verify session exists and belongs to user
+    const session = await this.getSession(sessionId, userId);
+    if (!session) {
+      return [];
+    }
+
+    const cursor = this.sql.exec(
+      'SELECT role, content FROM messages WHERE session_id = ? ORDER BY created_at ASC',
+      sessionId
+    );
+
+    return cursor.toArray().map((row: any) => ({
+      role: row.role as string,
+      content: row.content as string,
+    }));
+  }
+}
+
+/**
  * OpenCode Multi-Tenant Worker Class
  */
 export class Worker {
   readonly app: AppType;
+  private openCodeService: OpenCodeService;
+  private env: Env;
 
-  constructor() {
+  constructor(env: Env) {
+    this.env = env;
     this.app = new Hono<{ Bindings: Env; Variables: Variables }>();
+
+    // Get or create Session Durable Object
+    // Fallback to in-memory implementation for local development
+    let sessionDO: SessionDurableObjectState;
+    if (env.SESSIONS) {
+      // Use idFromName to create a proper DurableObjectId from the class name
+      const doId = env.SESSIONS.idFromName(SessionDurableObject.id);
+      sessionDO = env.SESSIONS.get(doId);
+    } else {
+      // Fallback: Use in-memory storage for local development
+      console.warn('[Worker] SESSIONS binding not available, using in-memory storage');
+      sessionDO = new InMemorySessionStore();
+    }
+
+    this.openCodeService = new OpenCodeService(
+      { apiKey: env.OPENCODE_API_KEY },
+      sessionDO
+    );
+
     this.setupRoutes();
   }
 
@@ -373,6 +760,23 @@ export class Worker {
     this.app.get('/', (c) => {
       const publishableKey = c.env.CLERK_PUBLISHABLE_KEY || '';
       return c.html(createHomePage(publishableKey));
+    });
+
+    // Verify invite code endpoint (no auth required)
+    this.app.get('/api/verify-invite', (c) => {
+      const inviteCode = c.req.query('code');
+      if (!inviteCode) {
+        return c.json({ valid: false, error: 'Invite code is required' }, 400);
+      }
+
+      const upperCode = inviteCode.toUpperCase();
+      const isValid = INVITATION_CODES.includes(upperCode);
+
+      return c.json({
+        valid: isValid,
+        code: upperCode,
+        message: isValid ? '✓ 有効な招待コードです' : '❌ 無効な招待コードです'
+      });
     });
 
     // Get token endpoint
@@ -427,38 +831,29 @@ export class Worker {
       const token = authHeader.substring(7); // Remove "Bearer " prefix
 
       try {
-        // Simple base64 decode to get payload
+        // Decode JWT to get payload
         const parts = token.split('.');
         if (parts.length !== 3) {
           return c.json({ error: 'Unauthorized', debug: 'invalid_jwt_format' }, 401);
         }
 
-        // Decode payload (Cloudflare Workers compatible)
-        let base64Payload = parts[1].replace(/-/g, '+').replace(/_/g, '/');
-        while (base64Payload.length % 4) {
-          base64Payload += '=';
-        }
-
-        const binaryString = atob(base64Payload);
-        const bytes = new Uint8Array(binaryString.length);
-        for (let i = 0; i < binaryString.length; i++) {
-          bytes[i] = binaryString.charCodeAt(i);
-        }
-        const decoded = new TextDecoder().decode(bytes);
-        const payload = JSON.parse(decoded);
+        // Decode payload using Buffer (Cloudflare Workers compatible)
+        const payload = JSON.parse(
+          Buffer.from(parts[1], 'base64url').toString('utf-8')
+        );
 
         // Check expiration
         const now = Math.floor(Date.now() / 1000);
-        if (payload.exp < now) {
+        if (payload.exp && payload.exp < now) {
           return c.json({ error: 'Unauthorized', debug: 'token_expired' }, 401);
         }
 
-        // Verify issuer (should be Clerk - supports both clerk.com and custom domains)
+        // Verify issuer
         if (!payload.iss || (!payload.iss.includes('clerk.') && !payload.iss.includes('.clerk.accounts.'))) {
-          return c.json({ error: 'Unauthorized', debug: 'invalid_issuer', iss: payload.iss }, 401);
+          return c.json({ error: 'Unauthorized', debug: 'invalid_issuer' }, 401);
         }
 
-        // Use the user ID from the token
+        // Get user ID
         const userId = payload.sub;
         if (!userId) {
           return c.json({ error: 'Unauthorized', debug: 'no_user_id' }, 401);
@@ -467,7 +862,8 @@ export class Worker {
         c.set('userId', userId);
         await next();
       } catch (error) {
-        return c.json({ error: 'Unauthorized', debug: String(error) }, 401);
+        console.error('[Auth] Token verification error:', error);
+        return c.json({ error: 'Unauthorized', debug: 'verify_error' }, 401);
       }
     };
 
@@ -479,49 +875,68 @@ export class Worker {
     apiRoutes.post('/prompt', async (c) => {
       const userId = c.get('userId');
       const body = await c.req.json();
-      const { prompt } = body as { prompt: string };
+      const { prompt, sessionId } = body as { prompt: string; sessionId?: string };
 
       if (!prompt) {
         return c.json({ error: 'prompt is required' }, 400);
       }
 
-      // TODO: Integrate with OpenCode SDK (when Sandbox access is available)
-      // For now, return a mock response
-      return c.json({
-        success: true,
-        response: `Executed prompt for user ${userId}: ${prompt}`,
-        note: 'OpenCode SDK integration coming soon',
-      });
+      try {
+        let actualSessionId: string;
+
+        if (sessionId) {
+          // Verify the session exists and belongs to this user
+          const session = await this.openCodeService.getSession(sessionId, userId);
+          if (!session) {
+            return c.json({ error: 'Session not found' }, 404);
+          }
+          actualSessionId = sessionId;
+        } else {
+          // Create new session
+          const session = await this.openCodeService.createSession(userId);
+          actualSessionId = session.id;
+        }
+
+        const response = await this.openCodeService.sendPrompt(actualSessionId, userId, prompt);
+
+        return c.json({
+          success: true,
+          response: response.text,
+          sessionId: actualSessionId,
+        });
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        console.error('[OpenCode] Error:', errorMessage, error);
+
+        return c.json({
+          success: false,
+          error: errorMessage,
+        }, 500);
+      }
     });
 
     // Sessions routes
-    apiRoutes.get('/sessions', (c) => {
+    apiRoutes.get('/sessions', async (c) => {
       const userId = c.get('userId');
-      const userSessions = Array.from(sessions.values()).filter(s => s.userId === userId);
+      const userSessions = await this.openCodeService.listUserSessions(userId);
       return c.json({ sessions: userSessions });
     });
 
-    apiRoutes.post('/sessions', (c) => {
+    apiRoutes.post('/sessions', async (c) => {
       const userId = c.get('userId');
-      const session: Session = {
-        id: `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
-        userId,
-        createdAt: new Date().toISOString(),
-      };
-      sessions.set(session.id, session);
+      const session = await this.openCodeService.createSession(userId);
       return c.json(session, 201);
     });
 
-    apiRoutes.delete('/sessions/:id', (c) => {
+    apiRoutes.delete('/sessions/:id', async (c) => {
       const userId = c.get('userId');
       const sessionId = c.req.param('id');
-      const session = sessions.get(sessionId);
+      const deleted = await this.openCodeService.deleteSession(sessionId, userId);
 
-      if (!session || session.userId !== userId) {
+      if (!deleted) {
         return c.json({ error: 'Session not found' }, 404);
       }
 
-      sessions.delete(sessionId);
       return c.body(null, 204);
     });
 
@@ -542,12 +957,10 @@ export class Worker {
   }
 }
 
-// Export singleton instance
-export const worker = new Worker();
-
 // Default export for Cloudflare Workers
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
+    const worker = new Worker(env);
     return worker.fetch(request, env);
   },
 };

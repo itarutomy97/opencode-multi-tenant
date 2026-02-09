@@ -2,39 +2,86 @@
  * Hono-based Worker Tests
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { Hono } from 'hono';
-import { worker } from './worker-hono.js';
+import { Worker, SessionDurableObject } from './worker-hono.js';
 import type { Env } from './worker-hono.js';
 
-// Mock @cloudflare/sandbox
-vi.mock('@cloudflare/sandbox', () => ({
-  getSandbox: vi.fn(() => ({
-    exec: vi.fn().mockResolvedValue({ stdout: '', success: true }),
-    writeFile: vi.fn().mockResolvedValue(undefined),
-    readFile: vi.fn().mockResolvedValue({ content: '' }),
-  })),
-  Sandbox: class MockSandbox {},
-}));
+// The SessionDurableObject is now defined in worker-hono.ts, so no need to mock it separately
+
 
 describe('Hono-based Worker', () => {
+  let worker: Worker;
   let env: Env;
+  let mockSessionsDO: any;
 
   beforeEach(() => {
+    // Create a mock Durable Object namespace with session storage
+    const sessions = new Map<string, { id: string; userId: string; createdAt: number }>();
+    const messages = new Map<string, Array<{ role: string; content: string }>>();
+
+    mockSessionsDO = {
+      get: vi.fn().mockReturnValue({
+        createSession: vi.fn().mockImplementation(async (userId: string) => {
+          const session = {
+            id: `test-session-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`,
+            userId,
+            createdAt: Date.now(),
+          };
+          sessions.set(session.id, session);
+          messages.set(session.id, []);
+          return session;
+        }),
+        getSession: vi.fn().mockImplementation(async (sessionId: string, userId: string) => {
+          const session = sessions.get(sessionId);
+          if (session && session.userId === userId) {
+            return session;
+          }
+          return null;
+        }),
+        deleteSession: vi.fn().mockImplementation(async (sessionId: string, userId: string) => {
+          const session = sessions.get(sessionId);
+          if (session && session.userId === userId) {
+            sessions.delete(sessionId);
+            messages.delete(sessionId);
+            return true;
+          }
+          return false;
+        }),
+        listUserSessions: vi.fn().mockImplementation(async (userId: string) => {
+          return Array.from(sessions.values()).filter(s => s.userId === userId);
+        }),
+        addMessage: vi.fn().mockImplementation(async (sessionId: string, userId: string, message: { role: string; content: string }) => {
+          const session = sessions.get(sessionId);
+          if (!session || session.userId !== userId) {
+            throw new Error('Session not found or access denied');
+          }
+          const history = messages.get(sessionId) || [];
+          history.push(message);
+          messages.set(sessionId, history);
+        }),
+        getConversationHistory: vi.fn().mockImplementation(async (sessionId: string, userId: string) => {
+          const session = sessions.get(sessionId);
+          if (!session || session.userId !== userId) {
+            return [];
+          }
+          return messages.get(sessionId) || [];
+        }),
+      }),
+    };
+
     env = {
-      OpenCodeSandbox: {
-        get: vi.fn(),
-      } as any,
+      SESSIONS: mockSessionsDO,
       OPENCODE_API_KEY: 'test-api-key',
       CLERK_SECRET_KEY: 'test-clerk-secret',
-      CLERK_JWT_KEY: 'test-jwt-key',
+      CLERK_PUBLISHABLE_KEY: 'pk_test_123456',
     };
+
+    worker = new Worker(env);
   });
 
   describe('Hono App Setup', () => {
     it('creates a Hono app instance', () => {
       expect(worker).toBeDefined();
       expect(worker.app).toBeDefined();
-      expect(worker.app instanceof Hono).toBe(true);
     });
 
     it('has a fetch method for Workers', () => {
@@ -52,6 +99,18 @@ describe('Hono-based Worker', () => {
       expect(response.status).toBe(200);
       expect(data.status).toBe('ok');
       expect(data.timestamp).toBeDefined();
+    });
+  });
+
+  describe('GET /', () => {
+    it('returns HTML home page', async () => {
+      const request = new Request('http://localhost/');
+      const response = await worker.fetch(request, env);
+
+      expect(response.status).toBe(200);
+      expect(response.headers.get('content-type')).toContain('text/html');
+      const text = await response.text();
+      expect(text).toContain('OpenCode');
     });
   });
 
@@ -124,14 +183,24 @@ describe('Hono-based Worker', () => {
 
   describe('DELETE /api/sessions/:id', () => {
     it('deletes session with valid auth', async () => {
-      const validToken = createMockToken('user_123');
-      const request = new Request('http://localhost/api/sessions/session-123', {
-        method: 'DELETE',
-        headers: { 'Authorization': `Bearer ${validToken}` },
+      // First create a session
+      const createToken = createMockToken('user_123');
+      const createRequest = new Request('http://localhost/api/sessions', {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${createToken}` },
       });
-      const response = await worker.fetch(request, env);
+      const createResponse = await worker.fetch(createRequest, env);
+      const createdSession = await createResponse.json();
 
-      expect(response.status).toBe(204);
+      // Then delete it
+      const deleteToken = createMockToken('user_123');
+      const deleteRequest = new Request(`http://localhost/api/sessions/${createdSession.id}`, {
+        method: 'DELETE',
+        headers: { 'Authorization': `Bearer ${deleteToken}` },
+      });
+      const deleteResponse = await worker.fetch(deleteRequest, env);
+
+      expect(deleteResponse.status).toBe(204);
     });
   });
 

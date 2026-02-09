@@ -7,8 +7,16 @@ compatibility_flags = ["nodejs_compat"]
 [observability]
 enabled = true
 
+# Durable Objects (SQLite backend)
+[[durable_objects.bindings]]
+name = "SESSIONS"
+class_name = "SessionDurableObject"
+
+[migrations]
+tag = "v1"
+new_sqlite_classes = ["SessionDurableObject"]
+
 [vars]
 OPENCODE_API_KEY = "sk-Ms9w7DK8k3bWYTe57uIT3qgwo3hJA4o1ik4ObrklBb2pjTnjNodm6zq1l6tQuxV7"
 CLERK_SECRET_KEY = "sk_test_CbFNdNXPg7FoEUnUVEdLTxtBnU8v6pjiujpjiLxAp7"
 CLERK_PUBLISHABLE_KEY = "pk_test_cmVuZXdlZC1tYXJ0aW4tNjcuY2xlcmsuYWNjb3VudHMuZGV2JA"
-CLERK_JWT_KEY = ""
